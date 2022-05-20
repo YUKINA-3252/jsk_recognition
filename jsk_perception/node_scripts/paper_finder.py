@@ -96,8 +96,8 @@ class RectangleDetector(object):
     def __init__(self,
                  length_threshold=10,
                  distance_threshold=1.41421356,
-                 canny_th1=50.0,
-                 canny_th2=50.0,
+                 canny_th1=20.0,
+                 canny_th2=60.0,
                  canny_aperture_size=3,
                  do_merge=False):
         self.lsd = cv2.ximgproc.createFastLineDetector(
@@ -108,16 +108,23 @@ class RectangleDetector(object):
             canny_aperture_size,
             do_merge)
 
-    def find_squares(self, img):
+    def find_squares(self, img, line_width=10):
+        # hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # h, s, v = cv2.split(hsv)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        line_segments = self.lsd.detect(gray)
+        # gray = h
+        # monochrome
+        #ret, thresh = cv2.threshold(gray, , 255, cv2.THRESH_BINARY)
 
+        line_segments = self.lsd.detect(gray)
+        #line_segments = self.lsd.detect(thresh)
         if line_segments is None:
             line_segments = []
         edge_img = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
         for line in line_segments:
             x1, y1, x2, y2 = map(int, line[0][:4])
-            cv2.line(edge_img, (x1, y1), (x2, y2), (255, 255, 255), 10)
+            cv2.line(edge_img, (x1, y1), (x2, y2), (255, 255, 255),
+                     line_width)
 
         _, contours, _ = cv2.findContours(
             edge_img,
@@ -188,6 +195,9 @@ class PaperFinder(ConnectionBasedTransport):
         self.image_pub = self.advertise('~output/viz',
                                         sensor_msgs.msg.Image,
                                         queue_size=1)
+        self.monochrome_pub = self.advertise('output/viz/monochrome',
+                                             sensor_msgs.msg.Image,
+                                             queue_size=1)
         self.pose_array_pub = self.advertise('~output/pose',
                                              geometry_msgs.msg.PoseArray,
                                              queue_size=1)
@@ -197,6 +207,9 @@ class PaperFinder(ConnectionBasedTransport):
             '~output/length', std_msgs.msg.Float32MultiArray, queue_size=1)
         self.bridge = cv_bridge.CvBridge()
         self.camera_info_msg = None
+        self.lsd = cv2.ximgproc.createFastLineDetector(
+            10, 1.41421356, 20.0, 60.0, 3, False)
+
 
     def subscribe(self):
         queue_size = rospy.get_param('~queue_size', 10)
@@ -277,7 +290,11 @@ class PaperFinder(ConnectionBasedTransport):
         except cv_bridge.CvBridgeError as e:
             rospy.logerr('{}'.format(e))
             return
-        squares = self.rectangle_detector.find_squares(cv_image)
+        #hsv
+        # hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        # h, s, v = cv2.split(hsv)
+        squares = self.rectangle_detector.find_squares(cv_image, 10)
+        # squares = self.rectangle_detector.find_squares(hsv, 30)
 
         np_squares = np.array(squares, dtype=np.int32).reshape(-1, 2)
 
@@ -328,15 +345,17 @@ class PaperFinder(ConnectionBasedTransport):
             length_array.append(_d)
             length_array_for_publish = std_msgs.msg.Float32MultiArray(
                 data=length_array)
-            if abs(tmp[0] - self.rect_x) > self.length_tolerance or \
-               abs(tmp[1] - self.rect_x) > self.length_tolerance or \
-               abs(tmp[2] - self.rect_y) > self.length_tolerance or \
-               abs(tmp[3] - self.rect_y) > self.length_tolerance:
-                break
-            area_value = area(xyz_org)
-            if abs(self.area_size - area_value) < self.area_tolerance:
-                new_squares.append(squares[si])
-                valid_xyz_corners.append(xyz_org)
+            new_squares.append(squares[si])
+            valid_xyz_corners.append(xyz_org)
+            # if abs(tmp[0] - self.rect_x) > self.length_tolerance or \
+            #    abs(tmp[1] - self.rect_x) > self.length_tolerance or \
+            #    abs(tmp[2] - self.rect_y) > self.length_tolerance or \
+            #    abs(tmp[3] - self.rect_y) > self.length_tolerance:
+            #     break
+            # area_value = area(xyz_org)
+            # if abs(self.area_size - area_value) < self.area_tolerance:
+            #     new_squares.append(squares[si])
+            #     valid_xyz_corners.append(xyz_org)
         self.length_array_pub.publish(length_array_for_publish)
 
         pose_array_msg = geometry_msgs.msg.PoseArray(header=img_msg.header)
@@ -394,6 +413,21 @@ class PaperFinder(ConnectionBasedTransport):
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
             vis_msg.header.stamp = img_msg.header.stamp
             self.image_pub.publish(vis_msg)
+            monochrome_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+            edge_image = self.lsd.detect(monochrome_image)
+            monochrome_image = self.lsd.drawSegments(monochrome_image, edge_image)
+            line_segments = edge_image
+            if line_segments is None:
+                line_segments = []
+            #line_width = 30
+            line_width = 20
+            for line in line_segments:
+                x1, y1, x2, y2 = map(int, line[0][:4])
+                cv2.line(monochrome_image, (x1, y1), (x2, y2), (255, 255, 255),
+                         line_width)
+            monochrome_msg = bridge.cv2_to_imgmsg(monochrome_image, encoding='8UC3')
+            monochrome_msg.header.stamp = img_msg.header.stamp
+            self.monochrome_pub.publish(monochrome_msg)
 
     @property
     def visualize(self):
