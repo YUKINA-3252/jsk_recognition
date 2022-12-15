@@ -4,46 +4,14 @@
 import cv2
 import cv_bridge
 import geometry_msgs.msg
+from std_msgs.msg import Float32MultiArray
 from image_geometry.cameramodels import PinholeCameraModel
-from jsk_recognition_msgs.msg import BoundingBox
-from jsk_recognition_msgs.msg import BoundingBoxArray
-from jsk_topic_tools import ConnectionBasedTransport
 import message_filters
 import numpy as np
 import rospy
 import sensor_msgs.msg
-import std_msgs.msg
-from tf.transformations import quaternion_from_matrix
-from tf.transformations import unit_vector as normalize_vector
-
-
-def outer_product_matrix(v):
-    return np.array([[0, -v[2], v[1]],
-                     [v[2], 0, -v[0]],
-                     [-v[1], v[0], 0]])
-
-
-def cross_product(a, b):
-    return np.dot(outer_product_matrix(a), b)
-
-
-def rotation_matrix_from_axis(
-        first_axis=(1, 0, 0), second_axis=(0, 1, 0), axes='xy'):
-    if axes not in ['xy', 'yx', 'xz', 'zx', 'yz', 'zy']:
-        raise ValueError("Valid axes are 'xy', 'yx', 'xz', 'zx', 'yz', 'zy'.")
-    e1 = normalize_vector(first_axis)
-    e2 = normalize_vector(second_axis - np.dot(second_axis, e1) * e1)
-    if axes in ['xy', 'zx', 'yz']:
-        third_axis = cross_product(e1, e2)
-    else:
-        third_axis = cross_product(e2, e1)
-    e3 = normalize_vector(
-        third_axis - np.dot(third_axis, e1) * e1 - np.dot(third_axis, e2) * e2)
-    first_index = ord(axes[0]) - ord('x')
-    second_index = ord(axes[1]) - ord('x')
-    third_index = ((first_index + 1) ^ (second_index + 1)) - 1
-    indices = [first_index, second_index, third_index]
-    return np.vstack([e1, e2, e3])[np.argsort(indices)].T
+from tf.transformations import unit_vector, superimposition_matrix, quaternion_from_matrix
+from jsk_topic_tools import ConnectionBasedTransport
 
 
 def area(poly):
@@ -96,8 +64,8 @@ class RectangleDetector(object):
     def __init__(self,
                  length_threshold=10,
                  distance_threshold=1.41421356,
-                 canny_th1=20.0,
-                 canny_th2=60.0,
+                 canny_th1=50.0,
+                 canny_th2=50.0,
                  canny_aperture_size=3,
                  do_merge=False):
         self.lsd = cv2.ximgproc.createFastLineDetector(
@@ -108,27 +76,20 @@ class RectangleDetector(object):
             canny_aperture_size,
             do_merge)
 
-    def find_squares(self, img, line_width=10):
-        # hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        # h, s, v = cv2.split(hsv)
+    def find_squares(self, img):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # gray = h
-        # monochrome
-        #ret, thresh = cv2.threshold(gray, , 255, cv2.THRESH_BINARY)
-
         line_segments = self.lsd.detect(gray)
-        #line_segments = self.lsd.detect(thresh)
+
         if line_segments is None:
             line_segments = []
         edge_img = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
         for line in line_segments:
             x1, y1, x2, y2 = map(int, line[0][:4])
-            cv2.line(edge_img, (x1, y1), (x2, y2), (255, 255, 255),
-                     line_width)
+            cv2.line(edge_img, (x1, y1), (x2, y2), (255, 255, 255), 10)
 
         _, contours, _ = cv2.findContours(
             edge_img,
-            cv2.RETR_EXTERNAL,
+            cv2.RETR_CCOMP,
             cv2.CHAIN_APPROX_SIMPLE)
 
         squares = []
@@ -140,9 +101,9 @@ class RectangleDetector(object):
                                       True)
             if len(approx) == 4:
                 count += 1
-            # print(abs(cv2.contourArea(approx)))
             if (len(approx) == 4 and
-                abs(cv2.contourArea(approx)) > 1000):
+                abs(cv2.contourArea(approx)) > 1000
+                    and cv2.isContourConvex(approx)):
                 maxCosine = 0
                 for j in range(2, 5):
                     # find the maximum cosine of the angle between joint edges
@@ -153,8 +114,7 @@ class RectangleDetector(object):
                 # if cosines of all angles are small
                 # (all angles are ~90 degree) then write quandrange
                 # vertices to resultant sequence
-                # print(maxCosine)
-                if maxCosine < 1.0:
+                if maxCosine < 0.3:
                     squares.append(approx)
                     approx = np.array(approx).reshape(-1, 2)
                     cv2.polylines(img,
@@ -166,7 +126,7 @@ class RectangleDetector(object):
                              (0, 0, 255), 1)
                     cv2.line(img, tuple(approx[1]), tuple(approx[3]),
                              (0, 0, 255), 1)
-        return squares, edge_img
+        return squares
 
 
 def draw_squares(image, squares):
@@ -182,7 +142,7 @@ class PaperFinder(ConnectionBasedTransport):
         super(PaperFinder, self).__init__()
         self.rectangle_detector = RectangleDetector()
         self.angle_tolerance = rospy.get_param(
-            '~angle_tolerance', np.deg2rad(15.0))
+            '~angle_tolerance', np.rad2deg(5.0))
         # 210mm * 297mm = 62370mm^2
         self.area_tolerance = rospy.get_param(
             '~area_tolerance', 0.1)
@@ -196,21 +156,14 @@ class PaperFinder(ConnectionBasedTransport):
         self.image_pub = self.advertise('~output/viz',
                                         sensor_msgs.msg.Image,
                                         queue_size=1)
-        self.monochrome_pub = self.advertise('output/viz/monochrome',
-                                             sensor_msgs.msg.Image,
-                                             queue_size=1)
         self.pose_array_pub = self.advertise('~output/pose',
                                              geometry_msgs.msg.PoseArray,
                                              queue_size=1)
-        self.bounding_box_array_pub = self.advertise(
-            '~output/box', BoundingBoxArray, queue_size=1)
-        self.length_array_pub = self.advertise(
-            '~output/length', std_msgs.msg.Float32MultiArray, queue_size=1)
+        self.length_array_pub = self.advertise('~output/length',
+                                               std_msgs.msg.Float32MultiArray
+                                               queue_size=1)
         self.bridge = cv_bridge.CvBridge()
         self.camera_info_msg = None
-        self.lsd = cv2.ximgproc.createFastLineDetector(
-            10, 1.41421356, 20.0, 60.0, 3, False)
-
 
     def subscribe(self):
         queue_size = rospy.get_param('~queue_size', 10)
@@ -291,11 +244,7 @@ class PaperFinder(ConnectionBasedTransport):
         except cv_bridge.CvBridgeError as e:
             rospy.logerr('{}'.format(e))
             return
-        #hsv
-        # hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-        # h, s, v = cv2.split(hsv)
-        squares, tmp_img = self.rectangle_detector.find_squares(cv_image, 10)
-        # squares = self.rectangle_detector.find_squares(hsv, 30)
+        squares = self.rectangle_detector.find_squares(cv_image)
 
         np_squares = np.array(squares, dtype=np.int32).reshape(-1, 2)
 
@@ -314,55 +263,49 @@ class PaperFinder(ConnectionBasedTransport):
         xyzs = np.concatenate([x, y, z], axis=3)
         new_squares = []
         valid_xyz_corners = []
-        length_array_for_publish = std_msgs.msg.Float32MultiArray()
         for si, xyz in enumerate(xyzs):
-            if np.any(np.isnan(xyz)):
-                continue
             xyz_org = xyz.reshape(4, 3)
             xyz = np.concatenate([xyz, xyz], axis=0)
             valid = True
-            # for i in range(4):
-            #     vec_a = xyz[i] - xyz[i + 1]
-            #     vec_b = xyz[i + 2] - xyz[i + 1]
-            #     zzz = np.inner(vec_a, vec_b)
-            #     nnn = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
-            #     if nnn == 0.0:
-            #         valid = False
-            #         break
-            #     ccc = zzz / nnn
-            #     calc_axis = np.arccos(np.clip(ccc, -1.0, 1.0))
-            #     if abs(np.pi / 2.0 - calc_axis) > self.angle_tolerance:
-            #         valid = False
-            #         break
-            # if valid is False:
-            #     break
+            for i in range(4):
+                vec_a = xyz[i] - xyz[i + 1]
+                vec_b = xyz[i + 2] - xyz[i + 1]
+                zzz = np.inner(vec_a, vec_b)
+                nnn = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
+                if nnn == 0.0:
+                    valid = False
+                    break
+                ccc = zzz / nnn
+                calc_axis = np.arccos(np.clip(ccc, -1.0, 1.0))
+                if abs(np.pi / 2.0 - calc_axis) > self.angle_tolerance:
+                    valid = False
+                    break
+            if valid is False:
+                break
             _a = (np.sqrt(np.sum((xyz_org[0] - xyz_org[1]) ** 2)))
             _b = (np.sqrt(np.sum((xyz_org[1] - xyz_org[2]) ** 2)))
             _c = (np.sqrt(np.sum((xyz_org[2] - xyz_org[3]) ** 2)))
             _d = (np.sqrt(np.sum((xyz_org[3] - xyz_org[0]) ** 2)))
             tmp = sorted([_a, _b, _c, _d])
+            #Publish the length of the paper
+            #length_array = std_msgs.msg.Float32MultiArray()
             length_array = []
-            length_array.append(_a)
-            length_array.append(_b)
-            length_array.append(_c)
-            length_array.append(_d)
-            length_array_for_publish = std_msgs.msg.Float32MultiArray(
-                data=length_array)
-            valid_xyz_corners.append(xyz_org)
-
+            for p in range(4):
+                length_array.append(tmp[p])
+            length_array_forPublish = Float32MultiArray(data=length_array)
+            self.length_pub.publish(length_array_forPublish)
+            #self.length_pub.publish(length_array)
             if abs(tmp[0] - self.rect_x) > self.length_tolerance or \
                abs(tmp[1] - self.rect_x) > self.length_tolerance or \
                abs(tmp[2] - self.rect_y) > self.length_tolerance or \
                abs(tmp[3] - self.rect_y) > self.length_tolerance:
-                continue
+                break
             area_value = area(xyz_org)
-            # if abs(self.area_size - area_value) < self.area_tolerance:
-            new_squares.append(squares[si])
-            valid_xyz_corners.append(xyz_org)
-        self.length_array_pub.publish(length_array_for_publish)
+            if abs(self.area_size - area_value) < self.area_tolerance:
+                new_squares.append(squares[si])
+                valid_xyz_corners.append(xyz_org)
 
         pose_array_msg = geometry_msgs.msg.PoseArray(header=img_msg.header)
-        bounding_box_array_msg = BoundingBoxArray(header=img_msg.header)
         for xyz in valid_xyz_corners:
             center = np.mean(xyz, axis=0)
 
@@ -374,16 +317,12 @@ class PaperFinder(ConnectionBasedTransport):
             if normal[2] < 0:
                 normal *= -1.0
             normal = normal / np.linalg.norm(normal)
-            M = np.eye(4)
-            M[:3, :3] = rotation_matrix_from_axis(
-                normal, vec_a)
+            #
+            e1 = normal
+            e2 = unit_vector(vec_a)
+            e3 = np.cross(e1, e2)
+            M = superimposition_matrix([e1,e2,e3],((1,0,0),(0,1,0),(0,0,1)))
             q_xyzw = quaternion_from_matrix(M)
-            _a = (np.sqrt(np.sum((xyz[0] - xyz[1]) ** 2)))
-            _b = (np.sqrt(np.sum((xyz[1] - xyz[2]) ** 2)))
-            _c = (np.sqrt(np.sum((xyz[2] - xyz[3]) ** 2)))
-            _d = (np.sqrt(np.sum((xyz[3] - xyz[0]) ** 2)))
-            lengths = np.array([_a, _b, _c, _d])
-            indices = np.argsort(lengths)
 
             pose = geometry_msgs.msg.Pose()
             pose.position.x = center[0]
@@ -394,43 +333,13 @@ class PaperFinder(ConnectionBasedTransport):
             pose.orientation.z = q_xyzw[2]
             pose.orientation.w = q_xyzw[3]
             pose_array_msg.poses.append(pose)
-            bounding_box_array = BoundingBox(header=img_msg.header)
-            bounding_box_array.pose.position.x = center[0]
-            bounding_box_array.pose.position.y = center[1]
-            bounding_box_array.pose.position.z = center[2]
-            bounding_box_array.pose.orientation.x = q_xyzw[0]
-            bounding_box_array.pose.orientation.y = q_xyzw[1]
-            bounding_box_array.pose.orientation.z = q_xyzw[2]
-            bounding_box_array.pose.orientation.w = q_xyzw[3]
-            bounding_box_array.dimensions.x = 0.01
-            bounding_box_array.dimensions.y = (
-                lengths[indices[0]] + lengths[indices[1]]) / 2.0
-            bounding_box_array.dimensions.z = (
-                lengths[indices[2]] + lengths[indices[3]]) / 2.0
-            bounding_box_array_msg.boxes.append(bounding_box_array)
-        self.bounding_box_array_pub.publish(bounding_box_array_msg)
         self.pose_array_pub.publish(pose_array_msg)
 
         if self.visualize:
-            draw_squares(cv_image, new_squares)
+            draw_squares(cv_image, new_squares)            
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
             vis_msg.header.stamp = img_msg.header.stamp
             self.image_pub.publish(vis_msg)
-            monochrome_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-            edge_image = self.lsd.detect(monochrome_image)
-            monochrome_image = self.lsd.drawSegments(monochrome_image, edge_image)
-            line_segments = edge_image
-            if line_segments is None:
-                line_segments = []
-            #line_width = 30
-            line_width = 20
-            for line in line_segments:
-                x1, y1, x2, y2 = map(int, line[0][:4])
-                cv2.line(monochrome_image, (x1, y1), (x2, y2), (255, 255, 255),
-                         line_width)
-            monochrome_msg = bridge.cv2_to_imgmsg(tmp_img)
-            monochrome_msg.header.stamp = img_msg.header.stamp
-            self.monochrome_pub.publish(monochrome_msg)
 
     @property
     def visualize(self):
