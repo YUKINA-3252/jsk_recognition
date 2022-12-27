@@ -196,7 +196,7 @@ class PaperFinder(ConnectionBasedTransport):
         self.image_pub = self.advertise('~output/viz',
                                         sensor_msgs.msg.Image,
                                         queue_size=1)
-        self.monochrome_pub = self.advertise('output/viz/monochrome',
+        self.monochrome_pub = self.advertise('~output/viz/monochrome',
                                              sensor_msgs.msg.Image,
                                              queue_size=1)
         self.pose_array_pub = self.advertise('~output/pose',
@@ -271,7 +271,7 @@ class PaperFinder(ConnectionBasedTransport):
         if self.visualize:
             draw_squares(cv_image, squares)
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            vis_msg.header.stamp = msg.header.stamp
+            vis_msg.header = msg.header
             self.image_pub.publish(vis_msg)
 
     def _cb_with_depth(self, img_msg, depth_msg):
@@ -414,7 +414,7 @@ class PaperFinder(ConnectionBasedTransport):
         if self.visualize:
             draw_squares(cv_image, new_squares)
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            vis_msg.header.stamp = img_msg.header.stamp
+            vis_msg.header = img_msg.header
             self.image_pub.publish(vis_msg)
             monochrome_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
             edge_image = self.lsd.detect(monochrome_image)
@@ -429,7 +429,7 @@ class PaperFinder(ConnectionBasedTransport):
                 cv2.line(monochrome_image, (x1, y1), (x2, y2), (255, 255, 255),
                          line_width)
             monochrome_msg = bridge.cv2_to_imgmsg(tmp_img)
-            monochrome_msg.header.stamp = img_msg.header.stamp
+            monochrome_msg.header = img_msg.header
             self.monochrome_pub.publish(monochrome_msg)
 
     @property
