@@ -41,6 +41,7 @@ add_message_files(
   Object.msg
   ObjectArray.msg
   PanoramaInfo.msg  #  added on jsk_recognition_msgs until https://github.com/ros/common_msgs/pull/171 merged
+  PaperCorner.msg
   ParallelEdgeArray.msg
   ParallelEdge.msg
   PlotData.msg

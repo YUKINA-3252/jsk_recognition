@@ -7,6 +7,7 @@ import geometry_msgs.msg
 from image_geometry.cameramodels import PinholeCameraModel
 from jsk_recognition_msgs.msg import BoundingBox
 from jsk_recognition_msgs.msg import BoundingBoxArray
+from jsk_recognition_msgs.msg import PaperCorner
 from jsk_topic_tools import ConnectionBasedTransport
 import message_filters
 import numpy as np
@@ -15,6 +16,7 @@ import sensor_msgs.msg
 import std_msgs.msg
 from tf.transformations import quaternion_from_matrix
 from tf.transformations import unit_vector as normalize_vector
+from visualization_msgs.msg import MarkerArray, Marker
 
 
 def outer_product_matrix(v):
@@ -44,7 +46,6 @@ def rotation_matrix_from_axis(
     third_index = ((first_index + 1) ^ (second_index + 1)) - 1
     indices = [first_index, second_index, third_index]
     return np.vstack([e1, e2, e3])[np.argsort(indices)].T
-
 
 def area(poly):
     if len(poly) < 3:  # not a plane - no area
@@ -111,7 +112,6 @@ class RectangleDetector(object):
     def find_squares(self, img):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         line_segments = self.lsd.detect(gray)
-
         if line_segments is None:
             line_segments = []
         edge_img = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
@@ -146,7 +146,7 @@ class RectangleDetector(object):
                 # if cosines of all angles are small
                 # (all angles are ~90 degree) then write quandrange
                 # vertices to resultant sequence
-                if maxCosine < 0.3:
+                if maxCosine < 1.0:
                     squares.append(approx)
                     approx = np.array(approx).reshape(-1, 2)
                     cv2.polylines(img,
@@ -174,7 +174,7 @@ class PaperFinder(ConnectionBasedTransport):
         super(PaperFinder, self).__init__()
         self.rectangle_detector = RectangleDetector()
         self.angle_tolerance = rospy.get_param(
-            '~angle_tolerance', np.rad2deg(5.0))
+            '~angle_tolerance', np.deg2rad(15.0))
         # 210mm * 297mm = 62370mm^2
         self.area_tolerance = rospy.get_param(
             '~area_tolerance', 0.1)
@@ -197,7 +197,13 @@ class PaperFinder(ConnectionBasedTransport):
             '~output/length', std_msgs.msg.Float32MultiArray, queue_size=1)
         self.bridge = cv_bridge.CvBridge()
         self.camera_info_msg = None
-        self.cameramodel = None
+        self.corner_pub_x = self.advertise(
+            '~output/corner/x', PaperCorner, queue_size=1)
+        self.corner_pub_y = self.advertise(
+            '~output/corner/y', PaperCorner, queue_size=1)
+        self.marker_paper_pub = self.advertise('~output/marker_array',
+                                               MarkerArray,
+                                               queue_size=1)
 
     def subscribe(self):
         queue_size = rospy.get_param('~queue_size', 10)
@@ -258,13 +264,12 @@ class PaperFinder(ConnectionBasedTransport):
         if self.visualize:
             draw_squares(cv_image, squares)
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            vis_msg.header.stamp = msg.header.stamp
+            vis_msg.header = msg.header
             self.image_pub.publish(vis_msg)
 
     def _cb_with_depth(self, img_msg, depth_msg):
-        if self.camera_info_msg is None or self.cameramodel is None:
+        if self.camera_info_msg is None:
             rospy.loginfo("Waiting camera info ...")
-            return
         bridge = self.bridge
         try:
             cv_image = bridge.imgmsg_to_cv2(img_msg, 'bgr8')
@@ -299,25 +304,14 @@ class PaperFinder(ConnectionBasedTransport):
         new_squares = []
         valid_xyz_corners = []
         length_array_for_publish = std_msgs.msg.Float32MultiArray()
+        corner_array_x = PaperCorner(header=img_msg.header)
+        corner_array_y = PaperCorner(header=img_msg.header)
         for si, xyz in enumerate(xyzs):
+            # if np.any(np.isnan(xyz)):
+            #     continue
             xyz_org = xyz.reshape(4, 3)
             xyz = np.concatenate([xyz, xyz], axis=0)
             valid = True
-            for i in range(4):
-                vec_a = xyz[i] - xyz[i + 1]
-                vec_b = xyz[i + 2] - xyz[i + 1]
-                zzz = np.inner(vec_a, vec_b)
-                nnn = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
-                if nnn == 0.0:
-                    valid = False
-                    break
-                ccc = zzz / nnn
-                calc_axis = np.arccos(np.clip(ccc, -1.0, 1.0))
-                if abs(np.pi / 2.0 - calc_axis) > self.angle_tolerance:
-                    valid = False
-                    break
-            if valid is False:
-                break
             _a = (np.sqrt(np.sum((xyz_org[0] - xyz_org[1]) ** 2)))
             _b = (np.sqrt(np.sum((xyz_org[1] - xyz_org[2]) ** 2)))
             _c = (np.sqrt(np.sum((xyz_org[2] - xyz_org[3]) ** 2)))
@@ -330,19 +324,25 @@ class PaperFinder(ConnectionBasedTransport):
             length_array.append(_d)
             length_array_for_publish = std_msgs.msg.Float32MultiArray(
                 data=length_array)
+            # valid_xyz_corners.append(xyz_org)
+
             if abs(tmp[0] - self.rect_x) > self.length_tolerance or \
                abs(tmp[1] - self.rect_x) > self.length_tolerance or \
                abs(tmp[2] - self.rect_y) > self.length_tolerance or \
                abs(tmp[3] - self.rect_y) > self.length_tolerance:
-                break
+                continue
             area_value = area(xyz_org)
-            if abs(self.area_size - area_value) < self.area_tolerance:
-                new_squares.append(squares[si])
-                valid_xyz_corners.append(xyz_org)
+            new_squares.append(squares[si])
+            corner_array_x.corner = np.array([np_squares[4*si][0], np_squares[4*si+1][0], np_squares[4*si+2][0], np_squares[4*si+3][0]])
+            corner_array_y.corner = np.array([np_squares[4*si][1], np_squares[4*si+1][1], np_squares[4*si+2][1], np_squares[4*si+3][1]])
+            valid_xyz_corners.append(xyz_org)
         self.length_array_pub.publish(length_array_for_publish)
+        self.corner_pub_x.publish(corner_array_x)
+        self.corner_pub_y.publish(corner_array_y)
 
         pose_array_msg = geometry_msgs.msg.PoseArray(header=img_msg.header)
         bounding_box_array_msg = BoundingBoxArray(header=img_msg.header)
+        marker_paper_array_msg = MarkerArray()
         for xyz in valid_xyz_corners:
             center = np.mean(xyz, axis=0)
 
@@ -388,13 +388,36 @@ class PaperFinder(ConnectionBasedTransport):
             bounding_box_array.dimensions.z = (
                 lengths[indices[2]] + lengths[indices[3]]) / 2.0
             bounding_box_array_msg.boxes.append(bounding_box_array)
+
+            marker_paper = Marker()
+            marker_paper.header = img_msg.header
+            marker_paper.ns = "marker_paper"
+            marker_paper.id = 0
+            marker_paper.action = Marker.ADD
+            marker_paper.pose.position.x = center[0]
+            marker_paper.pose.position.y = center[1]
+            marker_paper.pose.position.z = center[2]
+            marker_paper.pose.orientation.x = q_xyzw[0]
+            marker_paper.pose.orientation.y = q_xyzw[1]
+            marker_paper.pose.orientation.z = q_xyzw[2]
+            marker_paper.pose.orientation.w = q_xyzw[3]
+            marker_paper.scale.x = 0.01
+            marker_paper.scale.y = (lengths[indices[0]] + lengths[indices[1]]) / 2.0
+            marker_paper.scale.z = (lengths[indices[2]] + lengths[indices[3]]) / 2.0
+            marker_paper.color.g = 1.0
+            marker_paper.color.b = 1.0
+            marker_paper.color.a = 1.0
+            marker_paper.lifetime = rospy.Duration()
+            marker_paper.type = 1
+            marker_paper_array_msg.markers.append(marker_paper)
         self.bounding_box_array_pub.publish(bounding_box_array_msg)
         self.pose_array_pub.publish(pose_array_msg)
+        self.marker_paper_pub.publish(marker_paper_array_msg)
 
         if self.visualize:
             draw_squares(cv_image, new_squares)
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            vis_msg.header.stamp = img_msg.header.stamp
+            vis_msg.header = img_msg.header
             self.image_pub.publish(vis_msg)
 
     @property

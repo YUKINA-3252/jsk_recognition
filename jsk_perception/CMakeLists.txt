@@ -37,7 +37,8 @@ find_package(catkin REQUIRED COMPONENTS
   rospack
   sensor_msgs
   std_msgs
-  tf)
+  tf
+  visualization_msgs)
 
 find_package(roseus)
 
@@ -180,6 +181,7 @@ catkin_package(
   posedetection_msgs
   sensor_msgs
   std_msgs
+  visualization_msgs
   DEPENDS
   INCLUDE_DIRS include ${EIGEN3_INCLUDE_DIRS}
   LIBRARIES ${PROJECT_NAME} oriented_gradient
