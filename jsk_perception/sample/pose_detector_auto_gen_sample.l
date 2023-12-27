@@ -41,6 +41,14 @@
     (send obj :name "jetson_box")
     obj))
 
+(defun make-tape-stand ()
+  (let ((obj (make-cube 90 130 60)))
+    (setq aface (send obj :face 0))
+    (send obj :paste-texture-to-face aface
+          :file "tape-stand.png")
+    (send obj :name "tape_stand")
+    obj))
+
 ;; < 2 >
 ;; . generate launch file
 (defun generate-launcher ()
@@ -54,10 +62,25 @@
                     "jetson-box.launch" :ns "/realsense_torso/color"
                     :image-remap-args '(("image" "image_rect_color"))
                     :gen-image-feature t
-                    :image-topic "image_rect_color"
+                    :image-topic "image_raw"
                     :image-topic-transport "compressed"
                     :gen-object-marker t
+                    ;; :object-frame-id "/base"
                     :object-frame-id "/base"
+                    :objectdetection-solve-tf t
+                    :objectdetection-remap-args '(("input/ObjectDetection" "ObjectDetection"))
+                    :object-builder (format nil "(make-cube ~A ~A ~A)" (elt (car (send obj :csg)) 1) (elt (car (send obj :csg)) 2) (elt (car (send obj :csg)) 3))
+                    :publish-tf t
+                    ))
+  (let ((obj (make-tape-stand)))
+    (gen-all-launch (list obj)
+                    "tape-stand.launch" :ns "/head_camera/rgb"
+                    :image-remap-args '(("image" "image_raw"))
+                    :gen-image-feature t
+                    :image-topic "image_raw"
+                    :image-topic-transport "compressed"
+                    :gen-object-marker t
+                    :object-frame-id "/WAIST"
                     :objectdetection-solve-tf t
                     :objectdetection-remap-args '(("input/ObjectDetection" "ObjectDetection"))
                     :object-builder (format nil "(make-cube ~A ~A ~A)" (elt (car (send obj :csg)) 1) (elt (car (send obj :csg)) 2) (elt (car (send obj :csg)) 3))
