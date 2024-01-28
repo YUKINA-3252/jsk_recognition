@@ -168,6 +168,18 @@ def draw_squares(image, squares):
         image = cv2.polylines(image, [p], True, (0, 255, 0), thickness=3)
 
 
+# def get_pixels_along_line(image, point1, point2):
+#     line_pixels = np.array([[point1, point2]], dtype=np.int32)
+
+#     pixels = []
+#     cv2.polylines(image, line_pixels, isClosed=False, color=(255, 255, 255), thickness=1)
+#     mask = cv2.inRange(image, (255, 255, 255), (255, 255, 255))
+#     points = cv2.findNonZero(mask)
+#     pixels.extend(points)
+
+#     return pixels
+
+
 class PaperFinder(ConnectionBasedTransport):
 
     def __init__(self):
@@ -335,10 +347,12 @@ class PaperFinder(ConnectionBasedTransport):
             new_squares.append(squares[si])
             corner_array_x.corner = np.array([np_squares[4*si][0], np_squares[4*si+1][0], np_squares[4*si+2][0], np_squares[4*si+3][0]])
             corner_array_y.corner = np.array([np_squares[4*si][1], np_squares[4*si+1][1], np_squares[4*si+2][1], np_squares[4*si+3][1]])
+            # print(get_pixels_along_line(cv_image, (corner_array_x.corner[0], corner_array_y.corner[0]), (corner_array_x.corner[1], corner_array_y.corner[1])))
             valid_xyz_corners.append(xyz_org)
         self.length_array_pub.publish(length_array_for_publish)
-        self.corner_pub_x.publish(corner_array_x)
-        self.corner_pub_y.publish(corner_array_y)
+        if len(corner_array_x.corner) == 4:
+            self.corner_pub_x.publish(corner_array_x)
+            self.corner_pub_y.publish(corner_array_y)
 
         pose_array_msg = geometry_msgs.msg.PoseArray(header=img_msg.header)
         bounding_box_array_msg = BoundingBoxArray(header=img_msg.header)
