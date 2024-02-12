@@ -72,15 +72,20 @@ def transform_position(ps_list, source_frame, target_frame):
     ps_list_transformed = np.dot(rotation_matrix, ps_list) + trans_np
     return ps_list_transformed
 
+def normalize_features(feature):
+    feature_mean = np.nanmin(feature)
+    feature_std = np.nanstd(feature)
+    return (feature - feature_mean) / feature_std
+
 class EdgeDetector(object):
 
     def __init__(self,
                  length_threshold=10,
-                 distance_threshold=1.41421356,
+                 distance_threshold=3,
                  canny_th1=50.0,
                  canny_th2=50.0,
                  canny_aperture_size=3,
-                 do_merge=False):
+                 do_merge=True):
         self.lsd = cv2.ximgproc.createFastLineDetector(
             length_threshold,
             distance_threshold,
@@ -122,9 +127,17 @@ class EdgeFinder(ConnectionBasedTransport):
         self.image_pub = self.advertise('~output/viz',
                                         sensor_msgs.msg.Image,
                                         queue_size=1)
+        self.line_segments_pub = self.advertise('~output/line', std_msgs.msg.Float32MultiArray, queue_size=1)
         self.bridge = cv_bridge.CvBridge()
         self.camera_info_msg = None
         self.cameramodel = None
+
+    def transform_position_apply_along_axis(self, trans_rot):
+        trans_np = np.asarray([trans_rot[0], trans_rot[1], trans_rot[2]])
+        q = Quaternion(trans_rot[6], trans_rot[3], trans_rot[4], trans_rot[5])
+        rotation_matrix = q.rotation_matrix
+        ps_list_transformed = np.dot(rotation_matrix, ps_list) + trans_np
+        return ps_list_transformed
 
     def subscribe(self):
         queue_size = rospy.get_param('~queue_size', 10)
@@ -221,13 +234,16 @@ class EdgeFinder(ConnectionBasedTransport):
         ps_list_transformed_pixel_v_a = int((ps_list_transformed_a[1] / ps_list_transformed_a[2] * cameramodel.fy() + cameramodel.cy()))
         ps_list_transformed_pixel_u_b = int((ps_list_transformed_b[0] / ps_list_transformed_b[2] * cameramodel.fx() + cameramodel.cx()))
         ps_list_transformed_pixel_v_b = int((ps_list_transformed_b[1] / ps_list_transformed_b[2] * cameramodel.fy() + cameramodel.cy()))
-        model_line_len = (self.ps_list_b_x - self.ps_list_a_x) ** 2 + (self.ps_list_b_y - self.ps_list_a_y) ** 2 + (self.ps_list_b_z - self.ps_list_a_z) ** 2
-        model_line_cetnter = np.array([(self.ps_list_a_x + self.ps_list_b_x) / 2, (self.ps_list_a_y + self.ps_list_b_y) / 2, (self.ps_list_a_z + self.ps_list_b_z) / 2])
-        model_line_direction = np.array([self.ps_list_b_x - self.ps_list_a_x, self.ps_list_b_y - self.ps_list_a_y, self.ps_list_b_z - self.ps_list_a_z])
+        model_line_len_3d = np.sqrt((self.ps_list_b_x - self.ps_list_a_x) ** 2 + (self.ps_list_b_y - self.ps_list_a_y) ** 2 + (self.ps_list_b_z - self.ps_list_a_z) ** 2)
+        model_line_len_2d = np.sqrt((ps_list_transformed_pixel_u_b - ps_list_transformed_pixel_u_a) ** 2 + (ps_list_transformed_pixel_v_b - ps_list_transformed_pixel_v_b) ** 2)
+        model_line_center_3d = np.array([(self.ps_list_a_x + self.ps_list_b_x) / 2, (self.ps_list_a_y + self.ps_list_b_y) / 2, (self.ps_list_a_z + self.ps_list_b_z) / 2])
+        model_line_center_2d = np.array([(ps_list_transformed_pixel_u_a + ps_list_transformed_pixel_u_b) / 2, (ps_list_transformed_pixel_v_a + ps_list_transformed_pixel_v_b) / 2])
+        model_line_direction_3d = np.array([self.ps_list_b_x - self.ps_list_a_x, self.ps_list_b_y - self.ps_list_a_y, self.ps_list_b_z - self.ps_list_a_z])
+        model_line_direction_2d = np.array([ps_list_transformed_pixel_u_b - ps_list_transformed_pixel_u_a, ps_list_transformed_pixel_v_b - ps_list_transformed_pixel_v_a])
 
         edges = self.edge_detector.find_edges(cv_image)
         np_edges = np.array(edges, dtype=np.int32).reshape(-1, 4)
-        np_edges_3d = np.zeros_like(np_edges)
+        np_edges_3d = np.zeros_like(np_edges, dtype=np.float64)
 
         # edges len
         np_edges_3d[:, 0] = (np_edges[:, 0] - cameramodel.cx()) / cameramodel.fx()
@@ -240,21 +256,87 @@ class EdgeFinder(ConnectionBasedTransport):
         np_edges_3d[:, 1] = np_edges_3d[:, 1] * z1
         np_edges_3d[:, 2] = np_edges_3d[:, 2] * z2
         np_edges_3d[:, 3] = np_edges_3d[:, 3] * z2
-        edges_len = np.sqrt((np_edges[:, 2] - np_edges[:, 0]) ** 2 + (np_edges[:, 3] - np_edges[:, 1]) ** 2 + (z2 - z1) ** 2)
-        print(edges_len)
+        np_edges_3d_xyz = np_edges_3d.copy().reshape(-1, 2)
+        np_edges_3d_xyz = np.insert(np_edges_3d_xyz, 2, 100, axis=1)
+        np_edges_3d_xyz[:, 2][::2] = z1
+        np_edges_3d_xyz[:, 2][1::2] = z2
+
+        # transform cameraframe to waist
+        listener = tf.TransformListener()
+        listener.waitForTransform(source_frame, target_frame, rospy.Time(0), rospy.Duration(3.0))
+        (trans, rot) = listener.lookupTransform(target_frame, source_frame, rospy.Time(0))
+
+        for i in range(np_edges_3d_xyz.shape[0]):
+            trans_np = np.asarray([trans[0], trans[1], trans[2]])
+            q = Quaternion(rot[3], rot[0], rot[1], rot[2])
+            rotation_matrix = q.rotation_matrix
+            np_edges_3d_xyz[i] = np.dot(rotation_matrix, np_edges_3d_xyz[i]) + trans_np
+
+        # np_edges_3d_xyz = np.apply_along_axis(self.transform_position_apply_along_axis, axis=1, arr=np_edges_3d_xyz, trans_rot)
+
+        #edges len
+        edges_len_3d = np.sqrt((np_edges_3d[:, 2] - np_edges_3d[:, 0]) ** 2 + (np_edges_3d[:, 3] - np_edges_3d[:, 1]) ** 2 + (z2 - z1) ** 2)
+        edges_len_2d = np.sqrt((np_edges[:, 2] - np_edges[:, 0]) ** 2 + (np_edges[:, 3] - np_edges[:, 1]) ** 2)
 
         # edges center
-        cx = (np_edges_3d[:, 0] + np_edges_3d[:, 2]) / 2
-        cy = (np_edges_3d[:, 1] + np_edges_3d[:, 3]) / 2
-        cz = (z1 + z2) / 2
-        np_edges_3d_center = np.column_stack((cx, cy, cz))
+        # cx_3d = (np_edges_3d[:, 0] + np_edges_3d[:, 2]) / 2
+        # cy_3d = (np_edges_3d[:, 1] + np_edges_3d[:, 3]) / 2
+        # cz_3d = (z1 + z2) / 2
+        cx_2d = (np_edges[:, 0] + np_edges[:, 2]) / 2
+        cy_2d = (np_edges[:, 1] + np_edges[:, 3]) / 2
+        np_edges_center_3d = np.mean(np_edges_3d_xyz.reshape(-1, 2, 3), axis=1)
+        np_edges_center_2d = np.column_stack((cx_2d, cy_2d))
 
         # edges direction
-        np_edges_3d_direction = (np_edges_3d[:, 2] - np_edges_3d[:, 0], np_edges_3d[:, 3] - np_edges_3d[:, 1], z2 - z1)
+        np_edges_direction_3d = np.vstack((np_edges_3d[:, 3] - np_edges_3d[:, 1], np_edges_3d[:, 2] - np_edges_3d[:, 0], z2 - z1)).T
+        np_edges_direction_2d = np.vstack((np_edges[:, 2] - np_edges[:, 0], np_edges[:, 3] - np_edges[:, 1])).T
+
+        # diff
+        diff_len_3d = np.abs(edges_len_3d - model_line_len_3d)
+        diff_len_2d = np.abs(edges_len_2d - model_line_len_2d)
+        diff_center_3d = np.sqrt(np.sum((np_edges_center_3d - model_line_center_3d) ** 2, axis=1))
+        diff_center_2d = np.sqrt(np.sum((np_edges_center_2d - model_line_center_2d) ** 2, axis=1))
+        diff_direction_3d = 1 - np.abs(np.sum(np_edges_direction_3d * model_line_direction_3d, axis=1)) / (np.linalg.norm(np_edges_direction_3d, axis=1) * np.linalg.norm(model_line_direction_3d))
+        diff_direction_2d = 1 - np.abs(np.sum(np_edges_direction_2d * model_line_direction_2d, axis=1)) / (np.linalg.norm(np_edges_direction_2d, axis=1) * np.linalg.norm(model_line_direction_2d))
+
+        # normalization
+        norm_diff_len_3d = normalize_features(diff_len_3d)
+        norm_diff_len_2d = normalize_features(diff_len_2d)
+        norm_diff_center_3d = normalize_features(diff_center_3d)
+        norm_diff_center_2d = normalize_features(diff_center_2d)
+        norm_diff_direction_3d = normalize_features(diff_direction_3d)
+        norm_diff_direction_2d = normalize_features(diff_direction_2d)
+
+        # find similar line
+        similarities = []
+        for i in range(np_edges_3d.shape[0]):
+            sim = 0
+            if np.isnan(edges_len_3d[i]):
+                sim += 2 * norm_diff_len_2d[i]
+            else:
+                sim += 2 * norm_diff_len_3d[i]
+            if np.any(np.isnan(np_edges_center_3d[i])):
+                sim += 7 * norm_diff_center_2d[i]
+            else:
+                sim += 7 * norm_diff_center_3d[i]
+            if np.any(np.isnan(np_edges_direction_3d[i])):
+                sim += norm_diff_direction_2d[i]
+            else:
+                sim += norm_diff_direction_3d[i]
+            similarities.append(sim)
+        most_similar_index = np.argmin(similarities)
+
+        line_segments_msg = std_msgs.msg.Float32MultiArray()
+        line_segments = [np_edges_3d_xyz[most_similar_index * 2][0], np_edges_3d_xyz[most_similar_index * 2][1], np_edges_3d_xyz[most_similar_index * 2][2], np_edges_3d_xyz[most_similar_index * 2 + 1][0], np_edges_3d_xyz[most_similar_index * 2 + 1][1], np_edges_3d_xyz[most_similar_index * 2 + 1][2]]
+        line_segments_msg.data = line_segments
+        self.line_segments_pub.publish(line_segments_msg)
+        # print(np_edges_3d[most_similar_index], z1[most_similar_index], z2[most_similar_index])
+        # print(model_line_center_3d, model_line_center_2d, np_edges_center_3d[most_similar_index], np_edges_center_2d[most_similar_index], diff_center_3d[most_similar_index], diff_center_2d[most_similar_index])
 
         if self.visualize:
             draw_edges(cv_image, edges)
             cv2.line(cv_image, (ps_list_transformed_pixel_u_a, ps_list_transformed_pixel_v_a), (ps_list_transformed_pixel_u_b, ps_list_transformed_pixel_v_b), (255, 0, 0), 5)
+            cv2.line(cv_image, (np_edges[most_similar_index][0], np_edges[most_similar_index][1]), (np_edges[most_similar_index][2], np_edges[most_similar_index][3]), (0, 255, 0), 5)
             vis_msg = bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
             vis_msg.header.stamp = img_msg.header.stamp
             self.image_pub.publish(vis_msg)
