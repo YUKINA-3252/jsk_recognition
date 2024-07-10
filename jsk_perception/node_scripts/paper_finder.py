@@ -146,7 +146,7 @@ class RectangleDetector(object):
                 # if cosines of all angles are small
                 # (all angles are ~90 degree) then write quandrange
                 # vertices to resultant sequence
-                if maxCosine < 0.3:
+                if maxCosine < 1.0:
                     squares.append(approx)
                     approx = np.array(approx).reshape(-1, 2)
                     cv2.polylines(img,
@@ -174,7 +174,7 @@ class PaperFinder(ConnectionBasedTransport):
         super(PaperFinder, self).__init__()
         self.rectangle_detector = RectangleDetector()
         self.angle_tolerance = rospy.get_param(
-            '~angle_tolerance', np.rad2deg(5.0))
+            '~angle_tolerance', np.rad2deg(15.0))
         # 210mm * 297mm = 62370mm^2
         self.area_tolerance = rospy.get_param(
             '~area_tolerance', 0.1)
